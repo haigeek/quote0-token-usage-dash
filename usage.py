@@ -11,6 +11,8 @@ OpenAI Codex: uses OAuth token from ~/.codex/auth.json
 import json
 import os
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,11 +45,23 @@ def load_credentials() -> dict:
 
 
 def save_credentials(creds: dict) -> None:
+    """Merge `creds` into the stored claudeAiOauth block, writing atomically.
+
+    Claude Code reads the same file, so a partial write would log the user out.
+    """
     with open(CREDENTIALS_PATH) as f:
         data = json.load(f)
     data["claudeAiOauth"].update(creds)
-    with open(CREDENTIALS_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+
+    fd, tmp_path = tempfile.mkstemp(dir=CREDENTIALS_PATH.parent, prefix=".credentials.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, CREDENTIALS_PATH)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 
 def _refresh_token(refresh_token: str) -> dict:
@@ -60,8 +74,26 @@ def _refresh_token(refresh_token: str) -> dict:
         },
         timeout=10,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(
+            f"Token refresh failed ({resp.status_code}). Run `claude` and re-authenticate."
+        )
     return resp.json()
+
+
+def _refresh_and_store(creds: dict) -> str:
+    """Refresh the access token and persist the whole rotated credential set."""
+    new = _refresh_token(creds["refreshToken"])
+    updated = {
+        "accessToken": new["access_token"],
+        # The refresh token rotates; keeping a stale one locks us (and Claude
+        # Code) out on the next refresh.
+        "refreshToken": new.get("refresh_token", creds["refreshToken"]),
+    }
+    if new.get("expires_in"):
+        updated["expiresAt"] = int(time.time() * 1000) + int(new["expires_in"]) * 1000
+    save_credentials(updated)
+    return updated["accessToken"]
 
 
 def _fetch_claude_usage(access_token: str) -> dict:
@@ -79,20 +111,23 @@ def _fetch_claude_usage(access_token: str) -> dict:
     return resp.json()
 
 
+# Refresh this far ahead of the stored expiry rather than waiting for a 401.
+REFRESH_LEEWAY_MS = 5 * 60 * 1000
+
+
 def get_claude_usage() -> dict:
     creds = load_credentials()
-    access_token = creds["accessToken"]
+
+    expires_at = creds.get("expiresAt")
+    if expires_at and time.time() * 1000 >= expires_at - REFRESH_LEEWAY_MS:
+        return _fetch_claude_usage(_refresh_and_store(creds))
+
     try:
-        return _fetch_claude_usage(access_token)
+        return _fetch_claude_usage(creds["accessToken"])
     except requests.HTTPError as e:
-        if e.response.status_code != 401:
+        if e.response.status_code not in (401, 403):
             raise
-        new = _refresh_token(creds["refreshToken"])
-        save_credentials({
-            "accessToken": new["access_token"],
-            "refreshToken": new.get("refresh_token", creds["refreshToken"]),
-        })
-        return _fetch_claude_usage(new["access_token"])
+        return _fetch_claude_usage(_refresh_and_store(creds))
 
 
 # ---------------------------------------------------------------------------
