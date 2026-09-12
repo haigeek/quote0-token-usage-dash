@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 /tmp/
 .claude/settings.local.json
+build.local.sh
+*.local.sh

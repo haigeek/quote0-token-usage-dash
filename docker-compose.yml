@@ -1,0 +1,22 @@
+services:
+  token-usage-dash:
+    build: .
+    image: token-usage-dash:latest
+    container_name: token-usage-dash
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      UPDATE_INTERVAL: "1800"
+      # Clock shown in the rendered image.
+      TZ: "${TZ:-Asia/Shanghai}"
+      # Route API calls through the proxy running on the host. Harmless when
+      # the container already has direct access.
+      HTTP_PROXY: "${HTTP_PROXY_HOST:-http://host.docker.internal:7890}"
+      HTTPS_PROXY: "${HTTP_PROXY_HOST:-http://host.docker.internal:7890}"
+      NO_PROXY: "localhost,127.0.0.1,::1"
+    # Makes host.docker.internal resolve to the host on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # No volumes: credentials come from the environment, and nothing else
+    # needs to persist between restarts.
